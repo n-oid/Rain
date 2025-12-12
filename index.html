@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rain</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            cursor: crosshair;
+            font-family: "Courier New", Courier, monospace; /* 更有科幻终端的感觉 */
+        }
+        canvas {
+            display: block;
+        }
+        /* 游戏内 UI 统一样式 */
+        .ui-layer {
+            position: absolute;
+            pointer-events: none;
+            user-select: none;
+            color: rgba(255, 255, 255, 0.8);
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
+            text-align: center;
+        }
+
+        /* 顶部提示框 */
+        .instruction {
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.4);
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 3px solid rgba(255, 255, 255, 0.5);
+            backdrop-filter: blur(4px);
+            transition: opacity 2s;
+            text-align: left;
+        }
+
+        /* 底部进度 */
+        #progress-info {
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 14px;
+            letter-spacing: 2px;
+            opacity: 0; /* 开始时隐藏 */
+            transition: opacity 1s;
+        }
+
+        /* 边缘光晕指示器 */
+        .edge-indicator {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            pointer-events: none;
+            box-shadow: inset 0 0 150px rgba(100, 200, 255, 0.08);
+        }
+
+        /* 救援警告 (红色) */
+        #beacon-alert {
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff5555;
+            border: 1px solid rgba(255, 80, 80, 0.4);
+            background: rgba(50, 0, 0, 0.7);
+            padding: 10px 30px;
+            font-size: 16px;
+            letter-spacing: 3px;
+            opacity: 0;
+            transition: opacity 1s;
+        }
+
+        /* --- 最终结局浮窗 --- */
+        #victory-modal {
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 15, 30, 0.85); /* 深蓝黑色底 */
+            padding: 40px 60px;
+            border: 1px solid rgba(100, 255, 255, 0.3);
+            box-shadow: 0 0 50px rgba(100, 255, 255, 0.15);
+            border-radius: 2px;
+            opacity: 0; /* 初始透明 */
+            transition: opacity 3s ease-in; /* 3秒缓慢淡入 */
+            z-index: 100;
+        }
+        #victory-modal h1 {
+            font-size: 24px;
+            margin-bottom: 20px;
+            color: #fff;
+            letter-spacing: 5px;
+            font-weight: normal;
+        }
+        #victory-modal p {
+            font-size: 14px;
+            line-height: 1.8;
+            color: #bce;
+        }
+        .signal-icon {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background: #0f0;
+            border-radius: 50%;
+            margin-right: 10px;
+            box-shadow: 0 0 10px #0f0;
+            animation: blink 2s infinite;
+        }
+        @keyframes blink { 0%,100% {opacity: 1;} 50% {opacity: 0.3;} }
+
+    </style>
+</head>
+<body>
+
+    <audio id="bgm" loop hidden>
+        <source src="bgm.mp3" type="audio/mpeg">
+    </audio>
+
+    <div class="edge-indicator"></div>
+
+    <div class="instruction ui-layer" id="instructionBox">
+        📡 <b>信号寻找中...</b><br>
+        Move in any direction to explore<br>
+        Click to start
+    </div>
+    
+    <div id="beacon-alert" class="ui-layer">⚠ 信号微弱...启动紧急导航 ⚠</div>
+    
+    <div id="progress-info" class="ui-layer"> 0 / 4</div>
+
+    <div id="victory-modal" class="ui-layer">
+        <h1><span class="signal-icon"></span>连接建立</h1>
+        <p>致宏福苑所有受災居民。願逝者安息，生者早日獲得援助，恢復生活。</p>
+	<p>To all affected residents of Hongfuyuan: May those we lost rest in peace, and may those who remain find care, warmth, and the strength to continue. </p>
+        <p>救援飞船正在进场，预计 T-10 分钟抵达。</p>
+        <br>
+        <p style="opacity: 0.6; font-size: 12px;">“https://www.yanchai.org.hk/form_option/once”</p>
+    </div>
+    
+    <canvas id="canvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const bgm = document.getElementById('bgm');
+    const instructionBox = document.getElementById('instructionBox');
+    const progressInfo = document.getElementById('progress-info');
+    const beaconAlert = document.getElementById('beacon-alert');
+    const victoryModal = document.getElementById('victory-modal');
+
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    let particles = [];
+    const MAX_PARTICLES = 1200; 
+    const EDGE_THRESHOLD = 150; 
+    const SCROLL_SPEED = 9;
+
+    const camera = { x: 0, y: 0 };
+    let lastCameraX = 0; let lastCameraY = 0;
+    
+    const mouse = { x: window.innerWidth/2, y: window.innerHeight/2 };
+    let lastGenX = 0; let lastGenY = 0;
+    
+    let musicStarted = false;
+    let targetVolume = 0.3; 
+    let currentVolume = 0.3;
+    const BASE_VOLUME = 0.3; 
+    // 修改 1: 提高最大音量上限
+    const MAX_VOLUME = 0.8; 
+
+    // --- 游戏逻辑配置 ---
+    const TARGET_SIZE = 180; 
+    const FILL_REQUIRED = 200; 
+    const ACTIVATION_THRESHOLD = 0.85; 
+    
+    const FRAMES_TO_SPAWN = 360; // 6秒
+    let exploreTimer = 0; 
+
+    const FRAMES_TO_GUIDE = 900; // 15秒
+    let guidanceTimer = 0; 
+    let isGuiding = false; 
+
+    // 目标池
+    const targetPool = [
+        { shape: 'tree', color: '#66ff66' },     // 绿树
+        { shape: 'snowman', color: '#ffffff' },  // 白雪人
+        { shape: 'raindrop', color: '#33cc99' }, // 青雨滴
+        { shape: 'star', color: '#ffcc00' }      // 金星星
+    ];
+
+    const activeTargets = [];
+    let isGameWon = false; // 是否通关
+
+    // ==========================================
+    // --- 图形绘制函数 (已优化树和雪人) ---
+    // ==========================================
+
+    function drawTreePath(ctx, size) {
+        const trunkW = size * 0.15;
+        const trunkH = size * 0.3;
+        const level1Base = size * 0.8; 
+        const level1H = size * 0.4;    
+        const level2Base = size * 0.5; 
+        const level2H = size * 0.4;    
+        const baseY = size / 2;
+
+        ctx.beginPath();
+        ctx.rect(-trunkW / 2, baseY - trunkH, trunkW, trunkH); // 树干
+
+        const level1Y = baseY - trunkH + 10; 
+        ctx.moveTo(-level1Base / 2, level1Y);
+        ctx.lineTo(0, level1Y - level1H);     
+        ctx.lineTo(level1Base / 2, level1Y);  
+        
+        const level2Y = level1Y - level1H + 15; 
+        ctx.moveTo(-level2Base / 2, level2Y); 
+        ctx.lineTo(0, level2Y - level2H);     
+        ctx.lineTo(level2Base / 2, level2Y);  
+    }
+
+    function drawSnowmanPath(ctx, size) {
+        const bodyR = size * 0.35;
+        const headR = size * 0.22;
+        const headCy = -size * 0.15;
+        const bodyCy = headCy + headR + bodyR - 5;
+
+        ctx.beginPath();
+        ctx.arc(0, bodyCy, bodyR, 0, Math.PI * 2); // 身体
+        ctx.arc(0, headCy, headR, 0, Math.PI * 2); // 头
+        
+        // 手臂优化
+        const armStartY = bodyCy - bodyR * 0.3;
+        const armStartX = bodyR * 0.9; 
+        const armEndX = size * 0.65;
+        const armEndY = armStartY - size * 0.15; 
+
+        ctx.moveTo(armStartX, armStartY);
+        ctx.lineTo(armEndX, armEndY);
+        ctx.moveTo(-armStartX, armStartY);
+        ctx.lineTo(-armEndX, armEndY);
+    }
+
+    function drawRaindropPath(ctx, size) {
+        const width = size * 0.8;
+        const height = size;
+        ctx.beginPath();
+        ctx.moveTo(0, -height / 2); 
+        ctx.bezierCurveTo(-width / 2, height / 10, -width / 2, height / 2, 0, height / 2);
+        ctx.bezierCurveTo(width / 2, height / 2, width / 2, height / 10, 0, -height / 2);
+        ctx.closePath();
+    }
+
+    function drawStarPath(ctx, size) {
+        const outerRadius = size / 2;
+        const innerRadius = size / 4.5;
+        const spikes = 5;
+        let rot = Math.PI / 2 * 3;
+        let x = 0; let y = 0;
+        const step = Math.PI / spikes;
+
+        ctx.beginPath();
+        ctx.moveTo(0, -outerRadius);
+        for (let i = 0; i < spikes; i++) {
+            x = Math.cos(rot) * outerRadius;
+            y = Math.sin(rot) * outerRadius;
+            ctx.lineTo(x, y);
+            rot += step;
+            x = Math.cos(rot) * innerRadius;
+            y = Math.sin(rot) * innerRadius;
+            ctx.lineTo(x, y);
+            rot += step;
+        }
+        ctx.lineTo(0, -outerRadius);
+        ctx.closePath();
+    }
+    // ==========================================
+
+
+    function tryPlayMusic() {
+        if (!musicStarted) {
+            bgm.volume = BASE_VOLUME;
+            bgm.play().then(() => {
+                musicStarted = true;
+                instructionBox.style.opacity = 0;
+                progressInfo.style.opacity = 1;
+            }).catch(e => { console.log("等待交互"); });
+        }
+    }
+
+    function updateVolume() {
+        if (musicStarted) {
+            if (targetVolume > BASE_VOLUME) targetVolume -= 0.002; 
+            currentVolume += (targetVolume - currentVolume) * 0.05;
+            bgm.volume = Math.max(0, Math.min(1, currentVolume));
+        }
+    }
+
+    function updateCamera() {
+        // 如果通关了，可以停止移动摄像机或者继续漫游，这里选择继续漫游
+        let moved = false;
+        let prevX = camera.x;
+        let prevY = camera.y;
+
+        if (mouse.x < EDGE_THRESHOLD) { camera.x -= SCROLL_SPEED; moved = true; }
+        if (mouse.x > canvas.width - EDGE_THRESHOLD) { camera.x += SCROLL_SPEED; moved = true; }
+        if (mouse.y < EDGE_THRESHOLD) { camera.y -= SCROLL_SPEED; moved = true; }
+        if (mouse.y > canvas.height - EDGE_THRESHOLD) { camera.y += SCROLL_SPEED; moved = true; }
+
+        if (moved && !isGameWon) {
+            // 生成逻辑
+            if (targetPool.length > 0) {
+                exploreTimer++;
+                if (exploreTimer > FRAMES_TO_SPAWN) {
+                    spawnNextTarget(prevX, prevY);
+                    exploreTimer = 0; 
+                }
+            }
+
+            // 救援逻辑
+            const hasUnfilled = activeTargets.some(t => !t.filled);
+            if (hasUnfilled && !isGuiding) {
+                guidanceTimer++;
+                if (guidanceTimer > FRAMES_TO_GUIDE) {
+                    isGuiding = true;
+                    beaconAlert.style.opacity = 1; 
+                    setTimeout(() => { beaconAlert.style.opacity = 0; }, 3000);
+                }
+            }
+        }
+    }
+
+    function spawnNextTarget(prevX, prevY) {
+        let dirX = camera.x - prevX;
+        let dirY = camera.y - prevY;
+
+        if (dirX === 0 && dirY === 0) {
+            dirX = Math.random() - 0.5;
+            dirY = Math.random() - 0.5;
+        }
+
+        const angle = Math.atan2(dirY, dirX);
+        const spawnDist = 900; 
+        
+        const centerX = camera.x + canvas.width / 2;
+        const centerY = camera.y + canvas.height / 2;
+
+        const spawnX = centerX + Math.cos(angle) * spawnDist;
+        const spawnY = centerY + Math.sin(angle) * spawnDist;
+
+        const template = targetPool.shift(); 
+
+        activeTargets.push({
+            x: spawnX,
+            y: spawnY,
+            shape: template.shape,
+            color: template.color,
+            progress: 0,
+            filled: false,
+            alpha: 0 
+        });
+        console.log("新的能量场已生成: " + template.shape);
+    }
+
+    function handleInteraction(x, y) {
+        tryPlayMusic();
+        // 修改 2: 音量增加更明显 (+0.25)
+        targetVolume = Math.min(MAX_VOLUME, targetVolume + 0.25);
+        explode(x + camera.x, y + camera.y);
+    }
+
+    window.addEventListener('mousedown', e => handleInteraction(e.clientX, e.clientY));
+    window.addEventListener('touchstart', e => handleInteraction(e.touches[0].clientX, e.touches[0].clientY));
+
+    window.addEventListener('mousemove', e => {
+        mouse.x = e.clientX;
+        mouse.y = e.clientY;
+        const dx = e.clientX - lastGenX;
+        const dy = e.clientY - lastGenY;
+        if (Math.sqrt(dx*dx + dy*dy) > 15) {
+            addParticles(e.clientX + camera.x, e.clientY + camera.y, 3);
+            lastGenX = e.clientX;
+            lastGenY = e.clientY;
+        }
+    });
+
+    window.addEventListener('touchmove', e => {
+        mouse.x = e.touches[0].clientX; mouse.y = e.touches[0].clientY;
+        const dx = mouse.x - lastTouchGenX;
+        const dy = mouse.y - lastTouchGenY;
+        if (!window.lastTouchGenX) { window.lastTouchGenX=0; window.lastTouchGenY=0; }
+        if (Math.sqrt(dx*dx + dy*dy) > 15) {
+            addParticles(mouse.x + camera.x, mouse.y + camera.y, 3);
+            window.lastTouchGenX = mouse.x;
+            window.lastTouchGenY = mouse.y;
+        }
+    });
+
+    function explode(worldCenterX, worldCenterY) {
+        addParticles(worldCenterX, worldCenterY, 15);
+        particles.forEach(p => {
+            let dx = p.worldX - worldCenterX;
+            let dy = p.worldY - worldCenterY;
+            if(dx === 0 && dy === 0) { dx = 0.1; dy = 0.1; }
+            let angle = Math.atan2(dy, dx);
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            
+            if (dist < 250) {
+                let force = (250 - dist) / 20; 
+                angle += (Math.random() - 0.5) * 0.8;
+                p.speedX += Math.cos(angle) * force;
+                p.speedY += Math.sin(angle) * force;
+                p.opacity = 1;
+                p.lengthScale = 1.8; 
+            }
+        });
+    }
+
+    function addParticles(worldX, worldY, count) {
+        for(let i = 0; i < count; i++){
+            particles.push(new Particle(worldX, worldY));
+        }
+        if (particles.length > MAX_PARTICLES) {
+            particles.splice(0, particles.length - MAX_PARTICLES);
+        }
+    }
+
+    function checkVictory() {
+        const filledCount = activeTargets.filter(t => t.filled).length;
+        progressInfo.textContent = `已激活信标: ${filledCount} / 4`;
+
+        // 如果所有4个目标都生成了且都满了
+        if (!isGameWon && targetPool.length === 0 && filledCount === 4) {
+            isGameWon = true;
+            // 修改 3: 显示通关浮窗 (淡入)
+            victoryModal.style.opacity = 1;
+            console.log("Victory!");
+        }
+    }
+
+    class Particle {
+        constructor(worldX, worldY){
+            this.worldX = worldX;
+            this.worldY = worldY;
+            this.baseSize = Math.random() * 15 + 8;
+            this.thickness = Math.random() * 2 + 2; 
+            this.lengthScale = 1;
+            this.speedX = Math.random() * 1.6 - 0.8; 
+            this.speedY = Math.random() * 1.6 - 0.8; 
+            this.gravity = 0.03; 
+            this.friction = 0.98; 
+            this.opacity = 1;
+            this.fadeSpeed = Math.random() * 0.005 + 0.002; 
+            this.hasContributed = false;
+        }
+
+        update(){
+            this.speedX *= this.friction;
+            this.speedY *= this.friction;
+            this.speedY += this.gravity; 
+            this.worldX += this.speedX;
+            this.worldY += this.speedY;
+            if (this.lengthScale > 1) this.lengthScale -= 0.05; 
+            this.opacity -= this.fadeSpeed;
+
+            if (!this.hasContributed && this.opacity > 0) {
+                activeTargets.forEach(target => {
+                    if (target.filled) return;
+                    
+                    const dx = this.worldX - target.x;
+                    const dy = this.worldY - target.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    const hitRadius = TARGET_SIZE * 0.45; 
+
+                    if (dist < hitRadius) {
+                        target.progress++; 
+                        this.hasContributed = true; 
+                        this.fadeSpeed = 0.1; 
+                        
+                        if (target.progress >= FILL_REQUIRED * ACTIVATION_THRESHOLD) {
+                            target.filled = true;
+                            // 重置救援
+                            guidanceTimer = 0;
+                            isGuiding = false;
+                            
+                            // 检查是否通关
+                            checkVictory();
+                        }
+                    }
+                });
+            }
+        }
+
+        draw(){
+            if (this.opacity <= 0) return;
+            const screenX = this.worldX - camera.x;
+            const screenY = this.worldY - camera.y;
+            if (screenX < -200 || screenX > canvas.width + 200 || screenY < -200 || screenY > canvas.height + 200) return;
+
+            let angle = Math.atan2(this.speedY, this.speedX + 0.0001);
+            const currentSpeed = Math.sqrt(this.speedX*this.speedX + this.speedY*this.speedY);
+            const length = (this.baseSize + currentSpeed * 2.8) * this.lengthScale;
+
+            ctx.save();
+            ctx.translate(screenX, screenY);
+            ctx.rotate(angle);
+            ctx.shadowBlur = 10; 
+            ctx.shadowColor = 'rgba(255, 255, 255, 0.6)';
+            let gradient = ctx.createLinearGradient(0, 0, -length, 0);
+            gradient.addColorStop(0, `rgba(255, 255, 255, ${this.opacity})`);
+            gradient.addColorStop(0.2, `rgba(255, 255, 255, ${this.opacity * 0.8})`);
+            gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(-length, -this.thickness / 2, length, this.thickness);
+            ctx.restore();
+        }
+    }
+
+    function drawHUD() {
+        if (!isGuiding) return;
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        const radius = 80; 
+
+        activeTargets.forEach(target => {
+            if (target.filled) return; 
+
+            const screenX = target.x - camera.x;
+            const screenY = target.y - camera.y;
+            const margin = TARGET_SIZE;
+            const isOffScreen = screenX < -margin || screenX > canvas.width + margin || 
+                                screenY < -margin || screenY > canvas.height + margin;
+
+            if (isOffScreen) {
+                const dx = screenX - centerX;
+                const dy = screenY - centerY;
+                const angle = Math.atan2(dy, dx);
+
+                ctx.save();
+                ctx.translate(centerX, centerY);
+                ctx.rotate(angle);
+                ctx.translate(radius, 0); 
+
+                ctx.globalAlpha = 0.5 + Math.sin(Date.now() * 0.01) * 0.5;
+                ctx.fillStyle = target.color;
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = target.color;
+                
+                ctx.beginPath();
+                ctx.moveTo(0, 0); 
+                ctx.lineTo(-15, -8);
+                ctx.lineTo(-15, 8);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            }
+        });
+    }
+
+    function drawTargets() {
+        activeTargets.forEach(target => {
+            const screenX = target.x - camera.x;
+            const screenY = target.y - camera.y;
+
+            if (target.alpha < 1) target.alpha += 0.01;
+
+            if (screenX < -TARGET_SIZE || screenX > canvas.width + TARGET_SIZE || 
+                screenY < -TARGET_SIZE || screenY > canvas.height + TARGET_SIZE) return;
+
+            ctx.save();
+            ctx.translate(screenX, screenY);
+            ctx.globalAlpha = target.alpha;
+
+            const fillRatio = Math.min(target.progress / FILL_REQUIRED, 1);
+            
+            if (target.filled) {
+                ctx.shadowBlur = 60; 
+                ctx.shadowColor = '#ffffff';
+                ctx.strokeStyle = '#ffffff';
+                ctx.fillStyle = '#ffffff';
+            } else {
+                if (target.shape === 'snowman') {
+                    ctx.shadowColor = '#aaddff';
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.fillStyle = '#ffffff';
+                } else {
+                    ctx.shadowColor = target.color;
+                    ctx.strokeStyle = target.color;
+                    ctx.fillStyle = target.color;
+                }
+                ctx.shadowBlur = 20 + (fillRatio * 30); 
+            }
+
+            ctx.lineWidth = 4;
+            const baseAlpha = target.filled ? 1 : 0.5;
+            ctx.globalAlpha = baseAlpha * target.alpha; 
+
+            switch (target.shape) {
+                case 'tree': drawTreePath(ctx, TARGET_SIZE); break;
+                case 'snowman': drawSnowmanPath(ctx, TARGET_SIZE); break;
+                case 'raindrop': drawRaindropPath(ctx, TARGET_SIZE); break;
+                case 'star': drawStarPath(ctx, TARGET_SIZE); break;
+            }
+            ctx.stroke();
+            
+            if (target.filled) {
+                ctx.globalAlpha = 1 * target.alpha;
+                ctx.fill();
+            }
+
+            ctx.restore();
+        });
+    }
+
+    function animate(){
+        updateCamera();
+        updateVolume();
+
+        const time = Date.now() * 0.0005;
+        const midPoint = 0.5 + Math.sin(time) * 0.2;
+        let skyGradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        skyGradient.addColorStop(0, '#000510'); 
+        skyGradient.addColorStop(midPoint, '#0a1a3a'); 
+        skyGradient.addColorStop(1, '#000000'); 
+        
+        ctx.fillStyle = skyGradient;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        drawTargets();
+
+        ctx.globalCompositeOperation = 'lighter'; 
+        for (let i = 0; i < particles.length; i++){
+            particles[i].update();
+            particles[i].draw();
+            if (particles[i].opacity <= 0.01){ 
+                particles.splice(i, 1);
+                i--;
+            }
+        }
+        ctx.globalCompositeOperation = 'source-over'; 
+        
+        drawHUD();
+
+        requestAnimationFrame(animate);
+    }
+    animate();
+
+    window.addEventListener('resize', () => { 
+        canvas.width = window.innerWidth; 
+        canvas.height = window.innerHeight; 
+    });
+
+</script>
+</body>
+</html>
